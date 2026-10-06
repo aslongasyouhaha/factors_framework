@@ -48,7 +48,8 @@ res.ic              # 每期 IC / Rank IC / cos IC
 | `factors/panel.py` | 宽矩阵截面操作：`to_wide`、`outlier_mask_and_clip`、`zscore_rows`、`fill_missing`、`neutralize_rows`、`quantile_codes` |
 | `factors/builders.py` | 长表预处理与 Fama-French 工具（`FactorBuildTools`） |
 | `factors/quantile.py` / `sorted_factor.py` | 分位因子、排序因子构建器（长表 `build()`，宽矩阵 `build_wide()`） |
-| `factors/backtest.py` | `FactorBacktester`：回测、IC、R²、汇总统计、绘图、因子回归 |
+| `factors/evaluation.py` | 因子评价：Newey-West t 值、IC 汇总与衰减、Fama-MacBeth、分年度表现 |
+| `factors/backtest.py` | `FactorBacktester`：回测、IC、R²、汇总统计、绘图、因子回归（可选 Newey-West 标准误） |
 | `fama_french/` | FF3 复现与 16 个基础因子（CRSP / Compustat） |
 | `embedded_leverage/` | Frazzini–Pedersen embedded leverage 复现（指数期权、杠杆 ETF） |
 
