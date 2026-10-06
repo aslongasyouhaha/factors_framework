@@ -216,6 +216,48 @@ def demean(
     return x
 
 
+def _regression_design(y, x, codes, n_groups, category_codes, add_intercept, min_obs):
+    """Mask incomplete rows and thin groups, then sweep out the intercept / category effects."""
+    y = np.asarray(y, dtype=float)
+    x = np.zeros((len(y), 0)) if x is None else np.asarray(x, dtype=float).reshape(len(y), -1)
+    if category_codes and not add_intercept:
+        raise ValueError("Category effects require add_intercept=True.")
+    mask = np.isfinite(y) & np.isfinite(x).all(axis=1) & (codes >= 0)
+    for cat in category_codes:
+        mask &= np.asarray(cat) >= 0
+    g = np.where(mask, codes, -1)
+    counts = np.bincount(g[mask], minlength=n_groups)
+    mask &= counts[np.maximum(g, 0)] >= min_obs
+    g = np.where(mask, codes, -1)
+    cats = [np.where(mask, np.asarray(cat), -1) for cat in category_codes]
+
+    if add_intercept or cats:
+        yd = demean(np.where(mask, y, 0.0), g, n_groups, cats)
+        xd = np.column_stack([demean(np.where(mask, x[:, j], 0.0), g, n_groups, cats) for j in range(x.shape[1])]) if x.shape[1] else x
+    else:
+        yd, xd = np.where(mask, y, 0.0), np.where(mask[:, None], x, 0.0)
+    return y, x, mask, g, yd, xd
+
+
+def _solve_groups(xd: np.ndarray, yd: np.ndarray, mask: np.ndarray, g: np.ndarray, n_groups: int) -> np.ndarray:
+    """(n_groups, p) least-squares coefficients from per-group normal equations."""
+    p = xd.shape[1]
+    gm = g[mask]
+    xm, ym = xd[mask], yd[mask]
+    xtx = np.zeros((n_groups, p, p))
+    xty = np.zeros((n_groups, p))
+    for i in range(p):
+        xty[:, i] = np.bincount(gm, weights=xm[:, i] * ym, minlength=n_groups)
+        for j in range(i, p):
+            s = np.bincount(gm, weights=xm[:, i] * xm[:, j], minlength=n_groups)
+            xtx[:, i, j] = xtx[:, j, i] = s
+    # Scale columns per group so regressors on very different scales stay well conditioned.
+    d = np.sqrt(np.einsum("gii->gi", xtx))
+    d = np.where(d > 0, d, 1.0)
+    scaled = xtx / (d[:, :, None] * d[:, None, :])
+    return np.einsum("gij,gj->gi", np.linalg.pinv(scaled, rcond=1e-12, hermitian=True), xty / d) / d
+
+
 def residualize(
     y: np.ndarray,
     x: np.ndarray | None,
@@ -231,41 +273,47 @@ def residualize(
     never materialised; the remaining small regression is solved for all groups at once.
     Rows with any missing input, or groups with fewer than min_obs rows, get NaN.
     """
-    y = np.asarray(y, dtype=float)
-    x = np.zeros((len(y), 0)) if x is None else np.asarray(x, dtype=float).reshape(len(y), -1)
-    if category_codes and not add_intercept:
-        raise ValueError("Category neutralization requires add_intercept=True.")
-    mask = np.isfinite(y) & np.isfinite(x).all(axis=1) & (codes >= 0)
-    for cat in category_codes:
-        mask &= np.asarray(cat) >= 0
-    g = np.where(mask, codes, -1)
-    counts = np.bincount(g[mask], minlength=n_groups)
-    mask &= counts[np.maximum(g, 0)] >= min_obs
-    g = np.where(mask, codes, -1)
-    cats = [np.where(mask, np.asarray(cat), -1) for cat in category_codes]
-
-    if add_intercept or cats:
-        yd = demean(np.where(mask, y, 0.0), g, n_groups, cats)
-        xd = np.column_stack([demean(np.where(mask, x[:, j], 0.0), g, n_groups, cats) for j in range(x.shape[1])]) if x.shape[1] else x
-    else:
-        yd, xd = np.where(mask, y, 0.0), np.where(mask[:, None], x, 0.0)
-
+    _, _, mask, g, yd, xd = _regression_design(y, x, codes, n_groups, category_codes, add_intercept, min_obs)
     resid = yd
-    p = xd.shape[1]
-    if p:
-        gm = g[mask]
-        xm, ym = xd[mask], yd[mask]
-        xtx = np.zeros((n_groups, p, p))
-        xty = np.zeros((n_groups, p))
-        for i in range(p):
-            xty[:, i] = np.bincount(gm, weights=xm[:, i] * ym, minlength=n_groups)
-            for j in range(i, p):
-                s = np.bincount(gm, weights=xm[:, i] * xm[:, j], minlength=n_groups)
-                xtx[:, i, j] = xtx[:, j, i] = s
-        # Scale columns per group so regressors on very different scales stay well conditioned.
-        d = np.sqrt(np.einsum("gii->gi", xtx))
-        d = np.where(d > 0, d, 1.0)
-        scaled = xtx / (d[:, :, None] * d[:, None, :])
-        beta = np.einsum("gij,gj->gi", np.linalg.pinv(scaled, rcond=1e-12, hermitian=True), xty / d) / d
+    if xd.shape[1]:
+        beta = _solve_groups(xd, yd, mask, g, n_groups)
         resid = yd - np.einsum("np,np->n", xd, beta[np.maximum(g, 0)])
     return np.where(mask, resid, np.nan)
+
+
+def group_ols(
+    y: np.ndarray,
+    x: np.ndarray | None,
+    codes: np.ndarray,
+    n_groups: int,
+    category_codes: Sequence[np.ndarray] = (),
+    add_intercept: bool = True,
+    min_obs: int = 20,
+) -> dict[str, np.ndarray]:
+    """Per-group OLS of y on [intercept] + x + category dummies, solved for all groups at once.
+
+    Returns "beta" (n_groups, p), "intercept" (NaN when category effects absorb it), "r2"
+    (centred with an intercept, uncentred without) and "n". Thin groups are all NaN.
+    """
+    y, x, mask, g, yd, xd = _regression_design(y, x, codes, n_groups, category_codes, add_intercept, min_obs)
+    p = xd.shape[1]
+    n = np.bincount(g[mask], minlength=n_groups)
+    ok = n > 0
+    beta = _solve_groups(xd, yd, mask, g, n_groups) if p else np.zeros((n_groups, 0))
+    gi = np.maximum(g, 0)
+    resid = np.where(mask, yd - (np.einsum("np,np->n", xd, beta[gi]) if p else 0.0), 0.0)
+    ssr = np.bincount(g[mask], weights=resid[mask] ** 2, minlength=n_groups)
+    ym = y[mask]
+    sum_y = np.bincount(g[mask], weights=ym, minlength=n_groups)
+    sum_y2 = np.bincount(g[mask], weights=ym * ym, minlength=n_groups)
+    mean_y = sum_y / np.maximum(n, 1)
+    sst = sum_y2 - n * mean_y**2 if add_intercept else sum_y2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(ok & (sst > 0), 1.0 - ssr / sst, np.nan)
+    intercept = np.full(n_groups, np.nan)
+    if add_intercept and not category_codes:
+        sum_x = np.column_stack([np.bincount(g[mask], weights=x[mask, j], minlength=n_groups) for j in range(p)]) if p else np.zeros((n_groups, 0))
+        intercept = mean_y - np.einsum("gp,gp->g", sum_x / np.maximum(n, 1)[:, None], beta)
+    beta = np.where(ok[:, None], beta, np.nan)
+    intercept = np.where(ok, intercept, np.nan)
+    return {"beta": beta, "intercept": intercept, "r2": r2, "n": n}

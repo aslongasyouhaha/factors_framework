@@ -2,6 +2,19 @@ from .backtest import BacktestResult, FactorBacktester
 from .base import Factor, FactorBuilder, FactorConfig, WideFactor
 from .builders import FactorBuildTools, MissingValueRule, NeutralizationRule, OutlierRule, StandardizationRule
 from .engine import Book, LayerBook, SimulationResult, WeightBook, forward_returns, holding_segments, simulate
+from .evaluation import (
+    FamaMacBethResult,
+    fama_macbeth,
+    ic_by_year,
+    ic_decay,
+    ic_summary,
+    information_coefficient,
+    newey_west,
+    newey_west_lags,
+    newey_west_table,
+    performance_by_year,
+    performance_summary,
+)
 from .panel import (
     fill_missing,
     neutralize_rows,
@@ -34,9 +47,20 @@ __all__ = [
     "StandardizationRule",
     "WeightBook",
     "WideFactor",
+    "FamaMacBethResult",
+    "fama_macbeth",
     "fill_missing",
     "forward_returns",
     "holding_segments",
+    "ic_by_year",
+    "ic_decay",
+    "ic_summary",
+    "information_coefficient",
+    "newey_west",
+    "newey_west_lags",
+    "newey_west_table",
+    "performance_by_year",
+    "performance_summary",
     "neutralize_rows",
     "outlier_mask_and_clip",
     "quantile_codes",

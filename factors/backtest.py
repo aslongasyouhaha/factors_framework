@@ -8,6 +8,18 @@ import pandas as pd
 
 from .base import Factor
 from .engine import Book, LayerBook, SimulationResult, WeightBook, simulate
+from .evaluation import (
+    FamaMacBethResult,
+    fama_macbeth,
+    ic_by_year,
+    ic_decay,
+    ic_summary,
+    information_coefficient,
+    newey_west,
+    performance_by_year,
+    performance_summary,
+    univariate_r2,
+)
 from .panel import to_wide
 
 
@@ -21,6 +33,9 @@ class BacktestResult:
     r2: pd.DataFrame | None = None
     figures: dict[str, Any] = field(default_factory=dict)
     simulation: SimulationResult | None = None
+    by_year: pd.DataFrame | None = None
+    ic_summary: pd.DataFrame | None = None
+    ic_by_year: pd.DataFrame | None = None
 
 
 def _wide_returns(
@@ -36,36 +51,6 @@ def _wide_returns(
     if isinstance(frame.index, pd.MultiIndex) and list(frame.index.names[:2]) == ["date", "asset_id"]:
         frame = frame.reset_index().rename(columns={"date": date_col, "asset_id": asset_col})
     return to_wide(frame, ret_col, date_col=date_col, asset_col=asset_col)
-
-
-def _row_stats(x: np.ndarray, y: np.ndarray) -> dict[str, np.ndarray]:
-    """Pairwise-complete cross-sectional moments of each row of x against y."""
-    mask = np.isfinite(x) & np.isfinite(y)
-    n = mask.sum(axis=1)
-    x = np.where(mask, x, 0.0)
-    y = np.where(mask, y, 0.0)
-    safe_n = np.maximum(n, 1)
-    mx = x.sum(axis=1) / safe_n
-    my = y.sum(axis=1) / safe_n
-    dx = np.where(mask, x - mx[:, None], 0.0)
-    dy = np.where(mask, y - my[:, None], 0.0)
-    return {
-        "n": n,
-        "mx": mx,
-        "my": my,
-        "sxx": (dx * dx).sum(axis=1),
-        "syy": (dy * dy).sum(axis=1),
-        "sxy": (dx * dy).sum(axis=1),
-        "xx": (x * x).sum(axis=1),
-        "yy": (y * y).sum(axis=1),
-        "xy": (x * y).sum(axis=1),
-        "mask": mask,
-    }
-
-
-def _safe_div(num: np.ndarray, den: np.ndarray, ok: np.ndarray) -> np.ndarray:
-    ok = ok & (den > 0)
-    return np.where(ok, num / np.where(ok, den, 1.0), np.nan)
 
 
 @dataclass(frozen=True)
@@ -87,23 +72,7 @@ class FactorBacktester:
 
     def ic_wide(self, signal: pd.DataFrame, forward: pd.DataFrame) -> pd.DataFrame:
         """Per-date Pearson, rank and cosine IC between two aligned date x asset matrices."""
-        forward = forward.reindex(index=signal.index, columns=signal.columns)
-        x = signal.to_numpy(dtype=float)
-        y = forward.to_numpy(dtype=float)
-        st = _row_stats(x, y)
-        ok = st["n"] >= 2
-        rx = pd.DataFrame(np.where(st["mask"], x, np.nan)).rank(axis=1).to_numpy()
-        ry = pd.DataFrame(np.where(st["mask"], y, np.nan)).rank(axis=1).to_numpy()
-        rk = _row_stats(rx, ry)
-        out = pd.DataFrame(
-            {
-                "ic": _safe_div(st["sxy"], np.sqrt(st["sxx"] * st["syy"]), ok),
-                "rank_ic": _safe_div(rk["sxy"], np.sqrt(rk["sxx"] * rk["syy"]), ok),
-                "cos_ic": _safe_div(st["xy"], np.sqrt(st["xx"] * st["yy"]), ok),
-                "n_assets": st["n"],
-            },
-            index=pd.DatetimeIndex(signal.index, name="date"),
-        )
+        out = information_coefficient(signal, forward)
         for col in ["ic", "rank_ic", "cos_ic"]:
             out[f"cum_{col}"] = out[col].fillna(0.0).cumsum()
             vol = out[col].std(ddof=1)
@@ -112,19 +81,40 @@ class FactorBacktester:
 
     def r2_wide(self, signal: pd.DataFrame, forward: pd.DataFrame) -> pd.DataFrame:
         """Per-date univariate cross-sectional regression forward ~ alpha + beta * signal."""
-        forward = forward.reindex(index=signal.index, columns=signal.columns)
-        st = _row_stats(signal.to_numpy(dtype=float), forward.to_numpy(dtype=float))
-        ok = st["n"] >= 3
-        beta = _safe_div(st["sxy"], st["sxx"], ok)
-        return pd.DataFrame(
-            {
-                "r2": _safe_div(st["sxy"] ** 2, st["sxx"] * st["syy"], ok),
-                "alpha": st["my"] - beta * st["mx"],
-                "beta": beta,
-                "n_assets": st["n"],
-            },
-            index=pd.DatetimeIndex(signal.index, name="date"),
-        )
+        return univariate_r2(signal, forward)
+
+    # ------------------------------------------------------------------ evaluation
+
+    def newey_west(self, x: pd.Series, lags: int | None = None) -> pd.Series:
+        """Mean, Newey-West standard error and t-stat of a time series."""
+        return newey_west(x, lags)
+
+    def ic_summary(self, ic: pd.DataFrame, lags: int | None = None) -> pd.DataFrame:
+        """Mean, std, IR, Newey-West t and hit rate of ic / rank_ic / cos_ic."""
+        return ic_summary(ic, lags)
+
+    def ic_decay(self, signal: pd.DataFrame, period_returns: pd.DataFrame, max_lag: int = 12, lags: int | None = None) -> pd.DataFrame:
+        """IC against the return h periods ahead, h = 1..max_lag (see evaluation.ic_decay)."""
+        return ic_decay(signal, period_returns, max_lag=max_lag, lags=lags)
+
+    def fama_macbeth(
+        self,
+        forward: pd.DataFrame,
+        characteristics: dict[str, pd.DataFrame],
+        categories=None,
+        add_intercept: bool = True,
+        min_obs: int = 30,
+        lags: int | None = None,
+    ) -> FamaMacBethResult:
+        """Per-date cross-sectional regressions with Newey-West t-stats on the average slopes."""
+        return fama_macbeth(forward, characteristics, categories, add_intercept, min_obs, lags)
+
+    def performance_by_year(self, returns: pd.Series | pd.DataFrame, nw_lags: int | None = None) -> pd.DataFrame:
+        """summary statistics for each calendar year."""
+        return performance_by_year(returns, self.periods_per_year, nw_lags)
+
+    def ic_by_year(self, ic: pd.DataFrame) -> pd.DataFrame:
+        return ic_by_year(ic)
 
     # ------------------------------------------------------------------ long-format adapters
 
@@ -246,24 +236,13 @@ class FactorBacktester:
         returns: pd.Series,
         turnover: pd.DataFrame | pd.Series | None = None,
         turnover_periods_per_year: float | None = None,
+        nw_lags: int | None = None,
     ) -> pd.Series:
-        s = pd.Series(returns).dropna()
-        if s.empty:
-            return pd.Series(dtype=float)
-        vol = s.std(ddof=1)
-        wealth = (1 + s).cumprod()
-        drawdown = wealth / wealth.cummax() - 1
-        out = {
-            "n": len(s),
-            "ann_return": self.periods_per_year * s.mean(),
-            "ann_vol": np.sqrt(self.periods_per_year) * vol,
-            "sharpe": np.nan if vol == 0 else np.sqrt(self.periods_per_year) * s.mean() / vol,
-            "total_return": wealth.iloc[-1] - 1,
-            "max_drawdown": drawdown.min(),
-            "hit_rate": (s > 0).mean(),
-            "min": s.min(),
-            "max": s.max(),
-        }
+        """Annualised performance plus t_nw, the Newey-West t-stat of the mean return."""
+        out = performance_summary(returns, self.periods_per_year, nw_lags)
+        if out.empty:
+            return out
+        out = out.to_dict()
         if isinstance(turnover, pd.DataFrame):
             turnover = turnover["turnover"] if "turnover" in turnover.columns else None
         if turnover is not None and not turnover.empty:
@@ -333,7 +312,8 @@ class FactorBacktester:
     # ------------------------------------------------------------------ regressions
 
     @staticmethod
-    def ols(y: pd.Series, x: pd.DataFrame) -> pd.Series:
+    def ols(y: pd.Series, x: pd.DataFrame, hac_lags: int | None = None) -> pd.Series:
+        """OLS with intercept; t-stats are classical, or Newey-West with hac_lags (0 = White)."""
         data = pd.concat([y.rename("y"), x], axis=1).dropna()
         if data.empty:
             return pd.Series(dtype=float)
@@ -343,9 +323,18 @@ class FactorBacktester:
         beta, *_ = np.linalg.lstsq(xv, yv, rcond=None)
         fitted = xv @ beta
         resid = yv - fitted
-        dof = max(len(yv) - xv.shape[1], 1)
-        sigma2 = float(resid.T @ resid / dof)
-        cov = sigma2 * np.linalg.pinv(xv.T @ xv)
+        bread = np.linalg.pinv(xv.T @ xv)
+        if hac_lags is None:
+            dof = max(len(yv) - xv.shape[1], 1)
+            cov = float(resid.T @ resid / dof) * bread
+        else:
+            # Newey-West sandwich with Bartlett weights (statsmodels HAC, no df correction).
+            u = xv * resid[:, None]
+            meat = u.T @ u
+            for lag in range(1, min(hac_lags, len(yv) - 1) + 1):
+                g = u[lag:].T @ u[:-lag]
+                meat += (1.0 - lag / (hac_lags + 1)) * (g + g.T)
+            cov = bread @ meat @ bread
         se = np.sqrt(np.diag(cov))
         names = ["alpha", *data.drop(columns="y").columns.tolist()]
         out = {}
@@ -365,11 +354,12 @@ class FactorBacktester:
         date_col: str = "date",
         factor_cols: tuple[str, ...] = ("MKT_RF", "SMB", "HML"),
         rf_col: str = "RF",
+        hac_lags: int | None = None,
     ) -> pd.Series:
         data = asset_returns.merge(factors[[date_col, rf_col, *factor_cols]], on=date_col, how="inner")
         y = data[ret_col] - data[rf_col].fillna(0.0)
         x = data[list(factor_cols)]
-        result = self.ols(y, x)
+        result = self.ols(y, x, hac_lags=hac_lags)
         if "alpha" in result:
             result["alpha_ann"] = self.periods_per_year * result["alpha"]
         return result
@@ -426,7 +416,16 @@ class FactorBacktester:
             figures["performance"] = self.plot_performance(port_ret)
             figures["layers"] = self.plot_layers(layers)
         return BacktestResult(
-            returns=port_ret, summary=summ, turnover=turnover, layer_returns=layers, ic=ic, r2=r2, figures=figures
+            returns=port_ret,
+            summary=summ,
+            turnover=turnover,
+            layer_returns=layers,
+            ic=ic,
+            r2=r2,
+            figures=figures,
+            by_year=self.performance_by_year(port_ret.set_index("date")["ret"]),
+            ic_summary=self.ic_summary(ic) if ic is not None else None,
+            ic_by_year=self.ic_by_year(ic.set_index("date")) if ic is not None else None,
         )
 
     def _run_book(
@@ -460,6 +459,9 @@ class FactorBacktester:
             r2=r2,
             figures=figures,
             simulation=sim,
+            by_year=self.performance_by_year(sim.returns[main]),
+            ic_summary=self.ic_summary(ic) if ic is not None else None,
+            ic_by_year=self.ic_by_year(ic) if ic is not None else None,
         )
 
     def run_factor(
