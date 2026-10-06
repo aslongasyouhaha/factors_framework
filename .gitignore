@@ -1,0 +1,33 @@
+# Data, results and third-party documents are never committed:
+# CRSP / Compustat / OptionMetrics data are licensed, papers are copyrighted.
+*.zip
+*.pdf
+*.parquet
+*.csv
+*.xlsx
+*.db
+*.log
+*.err
+*.png
+*.html
+**/data/**
+!**/data/**/
+!**/data/**/*.ipynb
+results/
+outputs/
+figures/
+
+# Misplaced duplicate of embedded_leverage/scripts; pairs trading code not written yet.
+pair_trading/
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+.vscode/
+.idea/
