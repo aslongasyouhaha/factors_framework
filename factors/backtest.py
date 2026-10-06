@@ -6,8 +6,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .base import Factor
-from .engine import Book, LayerBook, SimulationResult, WeightBook, simulate
+from .base import WideFactor
+from .engine import Book, LayerBook, SimulationResult, forward_returns, simulate
 from .evaluation import (
     FamaMacBethResult,
     fama_macbeth,
@@ -20,7 +20,6 @@ from .evaluation import (
     performance_summary,
     univariate_r2,
 )
-from .panel import to_wide
 
 
 @dataclass
@@ -38,19 +37,10 @@ class BacktestResult:
     ic_by_year: pd.DataFrame | None = None
 
 
-def _wide_returns(
-    returns: pd.DataFrame,
-    date_col: str = "date",
-    asset_col: str = "asset_id",
-    ret_col: str = "ret",
-) -> pd.DataFrame:
-    """Accept either a date x asset matrix or a long (date, asset, ret) panel."""
-    if isinstance(returns.index, pd.DatetimeIndex) and ret_col not in returns.columns:
-        return returns
-    frame = returns
-    if isinstance(frame.index, pd.MultiIndex) and list(frame.index.names[:2]) == ["date", "asset_id"]:
-        frame = frame.reset_index().rename(columns={"date": date_col, "asset_id": asset_col})
-    return to_wide(frame, ret_col, date_col=date_col, asset_col=asset_col)
+def _require_wide(returns: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise TypeError("returns must be a date x asset matrix with a DatetimeIndex; convert long data with to_wide().")
+    return returns
 
 
 @dataclass(frozen=True)
@@ -68,7 +58,7 @@ class FactorBacktester:
         weight_base: pd.DataFrame | None = None,
     ) -> SimulationResult:
         """Simulate every portfolio in `book` on a date x asset return matrix (see engine.simulate)."""
-        return simulate(book, _wide_returns(returns), drift=drift, cost_bps=cost_bps, weight_base=weight_base)
+        return simulate(book, _require_wide(returns), drift=drift, cost_bps=cost_bps, weight_base=weight_base)
 
     def ic_wide(self, signal: pd.DataFrame, forward: pd.DataFrame) -> pd.DataFrame:
         """Per-date Pearson, rank and cosine IC between two aligned date x asset matrices."""
@@ -116,118 +106,26 @@ class FactorBacktester:
     def ic_by_year(self, ic: pd.DataFrame) -> pd.DataFrame:
         return ic_by_year(ic)
 
-    # ------------------------------------------------------------------ long-format adapters
-
-    @staticmethod
-    def _long_portfolio(sim: SimulationResult, name: str, date_col: str) -> pd.DataFrame:
-        out = pd.DataFrame(
-            {
-                "ret": sim.returns[name],
-                "gross_exposure": sim.gross[name],
-                "net_exposure": sim.net[name],
-                "n_assets": sim.n_assets[name].astype(int),
-            }
-        )
-        out = out[out["n_assets"].gt(0)]
-        return out.rename_axis(date_col).reset_index()
-
-    def compute_turnover(
-        self,
-        holdings: pd.DataFrame,
-        rebalance_col: str = "rebalance_date",
-        asset_col: str = "asset_id",
-        weight_col: str = "target_weight",
-    ) -> pd.DataFrame:
-        book = WeightBook.from_holdings(
-            holdings, weight_col=weight_col, rebalance_col=rebalance_col, asset_col=asset_col,
-            hold_start_col=None, hold_end_col=None,
-        )
-        w = book._weights[:, :, 0]
+    def compute_turnover(self, book: Book, portfolio: str | None = None) -> pd.DataFrame:
+        """Per-rebalance turnover (0.5 * sum|w_k - w_{k-1}|, target to target), gross, net and
+        number of holdings for one portfolio of the book."""
+        names = book.names
+        if portfolio is None:
+            if len(names) != 1:
+                raise ValueError(f"Book holds {names}; pass portfolio=.")
+            portfolio = names[0]
+        p = names.index(portfolio)
+        w = np.stack([book.weights_at(k)[:, p] for k in range(len(book.dates))]) if len(book.dates) else np.zeros((0, len(book.assets)))
         prev = np.vstack([np.zeros((1, w.shape[1])), w[:-1]])
         return pd.DataFrame(
             {
-                rebalance_col: book.dates,
+                "rebalance_date": book.dates,
                 "turnover": 0.5 * np.abs(w - prev).sum(axis=1),
                 "gross": np.abs(w).sum(axis=1),
                 "net": w.sum(axis=1),
                 "n_assets": (w != 0).sum(axis=1).astype(int),
             }
         )
-
-    def portfolio_returns(
-        self,
-        holdings: pd.DataFrame,
-        returns: pd.DataFrame,
-        date_col: str = "date",
-        asset_col: str = "asset_id",
-        ret_col: str = "ret",
-        mode: str = "factor",
-        transaction_cost_bps: float = 0.0,
-        drift: bool = False,
-    ) -> pd.DataFrame:
-        h = holdings
-        if mode == "long_only":
-            h = h[h["leg"].eq("long")].copy()
-            h["target_weight"] = h["target_weight"].abs()
-            h["target_weight"] = h["target_weight"] / h.groupby("rebalance_date")["target_weight"].transform("sum")
-        elif mode != "factor":
-            raise ValueError("mode must be 'factor' or 'long_only'.")
-        book = WeightBook.from_holdings(h, asset_col=asset_col)
-        r = _wide_returns(returns, date_col=date_col, asset_col=asset_col, ret_col=ret_col)
-        sim = simulate(book, r, drift=drift, cost_bps=transaction_cost_bps)
-        out = self._long_portfolio(sim, "portfolio", date_col)
-        if transaction_cost_bps:
-            cost = sim.cost["portfolio"]
-            first_rows = book.segments(pd.DatetimeIndex(r.index))[:, 0]
-            charged = pd.Series(0.0, index=sim.returns.index)
-            for lo, c in zip(first_rows, cost.to_numpy()):
-                if lo < len(r.index) and r.index[lo] in charged.index:
-                    charged[r.index[lo]] += c
-            out["cost"] = charged.reindex(out[date_col]).to_numpy()
-            out["ret_before_cost"] = out["ret"] + out["cost"]
-        return out
-
-    def layer_portfolio_returns(
-        self,
-        holdings: pd.DataFrame,
-        returns: pd.DataFrame,
-        date_col: str = "date",
-        asset_col: str = "asset_id",
-        ret_col: str = "ret",
-        group_col: str = "group",
-        drift: bool = False,
-    ) -> pd.DataFrame:
-        book = LayerBook.from_holdings(holdings, group_col=group_col, asset_col=asset_col)
-        r = _wide_returns(returns, date_col=date_col, asset_col=asset_col, ret_col=ret_col)
-        sim = simulate(book, r, drift=drift)
-        ret = sim.returns.stack().rename("ret")
-        n = sim.n_assets.stack().rename("n_assets").astype(int)
-        out = pd.concat([ret, n], axis=1).rename_axis([date_col, group_col]).reset_index()
-        return out[out["n_assets"].gt(0)].sort_values([date_col, group_col]).reset_index(drop=True)
-
-    def ic_analysis(
-        self,
-        panel: pd.DataFrame,
-        signal_col: str = "factor_value",
-        forward_ret_col: str = "forward_ret",
-        date_col: str = "date",
-        asset_col: str = "asset_id",
-    ) -> pd.DataFrame:
-        signal = to_wide(panel, signal_col, date_col=date_col, asset_col=asset_col)
-        forward = to_wide(panel, forward_ret_col, date_col=date_col, asset_col=asset_col)
-        return self.ic_wide(signal, forward).rename_axis(date_col).reset_index()
-
-    def r2_analysis(
-        self,
-        panel: pd.DataFrame,
-        signal_col: str = "factor_value",
-        forward_ret_col: str = "forward_ret",
-        date_col: str = "date",
-        asset_col: str = "asset_id",
-    ) -> pd.DataFrame:
-        signal = to_wide(panel, signal_col, date_col=date_col, asset_col=asset_col)
-        forward = to_wide(panel, forward_ret_col, date_col=date_col, asset_col=asset_col)
-        return self.r2_wide(signal, forward).rename_axis(date_col).reset_index()
 
     # ------------------------------------------------------------------ statistics
 
@@ -385,60 +283,22 @@ class FactorBacktester:
 
     def run(
         self,
-        holdings: pd.DataFrame | Book,
-        returns: pd.DataFrame,
-        signal_panel: pd.DataFrame | None = None,
-        mode: str = "factor",
-        transaction_cost_bps: float = 0.0,
-        make_plots: bool = True,
-        drift: bool = False,
-        forward: pd.DataFrame | None = None,
-    ) -> BacktestResult:
-        """Run a full backtest.
-
-        With a Book, `returns` is a date x asset matrix, `signal_panel` a date x asset signal
-        matrix and `forward` the matching forward returns (see engine.forward_returns).
-        With a long holdings table the legacy long-format path is used.
-        """
-        if isinstance(holdings, Book):
-            return self._run_book(holdings, returns, signal_panel, forward, transaction_cost_bps, make_plots, drift)
-
-        turnover = self.compute_turnover(holdings)
-        port_ret = self.portfolio_returns(
-            holdings, returns, mode=mode, transaction_cost_bps=transaction_cost_bps, drift=drift
-        )
-        summ = self.summary(port_ret["ret"], turnover=turnover)
-        layers = self.layer_portfolio_returns(holdings, returns, drift=drift)
-        ic = self.ic_analysis(signal_panel) if signal_panel is not None else None
-        r2 = self.r2_analysis(signal_panel) if signal_panel is not None else None
-        figures = {}
-        if make_plots:
-            figures["performance"] = self.plot_performance(port_ret)
-            figures["layers"] = self.plot_layers(layers)
-        return BacktestResult(
-            returns=port_ret,
-            summary=summ,
-            turnover=turnover,
-            layer_returns=layers,
-            ic=ic,
-            r2=r2,
-            figures=figures,
-            by_year=self.performance_by_year(port_ret.set_index("date")["ret"]),
-            ic_summary=self.ic_summary(ic) if ic is not None else None,
-            ic_by_year=self.ic_by_year(ic.set_index("date")) if ic is not None else None,
-        )
-
-    def _run_book(
-        self,
         book: Book,
         returns: pd.DataFrame,
-        signal: pd.DataFrame | None,
-        forward: pd.DataFrame | None,
-        cost_bps: float,
-        make_plots: bool,
-        drift: bool,
+        signal: pd.DataFrame | None = None,
+        forward: pd.DataFrame | None = None,
+        cost_bps: float = 0.0,
+        drift: bool = False,
+        weight_base: pd.DataFrame | None = None,
+        make_plots: bool = True,
     ) -> BacktestResult:
-        sim = self.simulate(book, returns, drift=drift, cost_bps=cost_bps)
+        """Simulate a book and evaluate it.
+
+        returns: date x asset matrix. signal / forward: rebalance-date x asset matrices of the
+        ranking signal and the return earned over the following holding period (see
+        engine.forward_returns); IC statistics are computed when both are given.
+        """
+        sim = self.simulate(book, returns, drift=drift, cost_bps=cost_bps, weight_base=weight_base)
         layer_names = book.labels if isinstance(book, LayerBook) else []
         main = [c for c in sim.returns.columns if c not in layer_names] or list(sim.returns.columns)
         ic = r2 = None
@@ -464,22 +324,9 @@ class FactorBacktester:
             ic_by_year=self.ic_by_year(ic) if ic is not None else None,
         )
 
-    def run_factor(
-        self,
-        factor: Factor,
-        returns: pd.DataFrame,
-        signal_panel: pd.DataFrame | None = None,
-        mode: str = "factor",
-        transaction_cost_bps: float = 0.0,
-        make_plots: bool = True,
-        drift: bool = False,
-    ) -> BacktestResult:
-        return self.run(
-            factor.holdings,
-            returns,
-            signal_panel=signal_panel,
-            mode=mode,
-            transaction_cost_bps=transaction_cost_bps,
-            make_plots=make_plots,
-            drift=drift,
-        )
+    def run_factor(self, factor: WideFactor, returns: pd.DataFrame, **kwargs) -> BacktestResult:
+        """run() for a factor from build_wide(): its signal is evaluated against the return over
+        each of its holding periods."""
+        book = factor.book
+        forward = forward_returns(_require_wide(returns), book.dates, book.start_dates, book.end_dates)
+        return self.run(book, returns, signal=factor.signal, forward=forward, **kwargs)

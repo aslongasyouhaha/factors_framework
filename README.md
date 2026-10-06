@@ -30,14 +30,14 @@ x = zscore_rows(x)
 cfg = FactorConfig(name="MOM", n_groups=10, weighting="value", long_groups=("D10",), short_groups=("D01",))
 wf  = QuantileSignalFactorBuilder(config=cfg, winsorize=False).build_wide(x, me)
 
-res = FactorBacktester(periods_per_year=252).run(
-    wf.book, R, signal_panel=wf.signal, forward=forward_returns(R, wf.book.dates), drift=True)
-res.summary         # 各层与多空组合的年化收益、Sharpe、回撤、换手
+res = FactorBacktester(periods_per_year=252).run_factor(wf, R, drift=True)
+res.summary         # 各层与多空组合的年化收益、Sharpe、NW t 值、回撤、换手
 res.layer_returns   # D01–D10 日收益
-res.ic              # 每期 IC / Rank IC / cos IC
+res.ic_summary      # IC / Rank IC / cos IC 的均值、IR、NW t 值
+res.by_year         # 分年度表现
 ```
 
-原有的长表接口（`FactorBuildTools.handle_outliers`、`FactorBacktester.portfolio_returns(holdings, returns)` 等）仍然可用，内部走同一套计算。
+**分工**：长表用于数据准备（清洗、合并、算滞后，`FactorBuildTools` 的过滤与预处理工具），宽矩阵用于计算（截面处理、回测、评价）。回测与评价只接受宽矩阵，长表数据先用 `to_wide()` 转换；持仓和结果需要存成长表时用 `book.to_long()`、`sim.to_long()`。
 
 ## 结构
 
