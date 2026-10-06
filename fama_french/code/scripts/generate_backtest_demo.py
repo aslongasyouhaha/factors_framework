@@ -11,12 +11,13 @@ PROJECT_ROOT = CODE_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT.parent))
 sys.path.insert(0, str(CODE_ROOT))
 
-from factors import FactorBacktester
+from factors import FactorBacktester, FactorConfig, QuantileSignalFactorBuilder, WeightBook, forward_returns, to_wide
 
 
 RESULTS = PROJECT_ROOT / "results"
 DEMO = RESULTS / "backtest_demo"
 FACTOR_NAMES = ["MKT_RF", "SMB", "HML"]
+LAYERS = [f"D{i:02d}" for i in range(1, 11)]
 
 
 def make_ff3_long_short_holdings(holdings: pd.DataFrame, factor_name: str) -> pd.DataFrame:
@@ -31,22 +32,19 @@ def make_ff3_long_short_holdings(holdings: pd.DataFrame, factor_name: str) -> pd
     return h
 
 
+def ff3_spread_book(holdings: pd.DataFrame, factor_name: str) -> WeightBook:
+    return WeightBook.from_holdings(make_ff3_long_short_holdings(holdings, factor_name), hold_start_col=None, hold_end_col=None)
+
+
 def market_turnover(monthly: pd.DataFrame, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
     m = monthly[monthly["ff_primary_share"]].copy()
     m["date"] = pd.to_datetime(m["date"])
     m = m[m["date"].between(start_date, end_date)].sort_values(["asset_id", "date"])
     m["lag_market_equity"] = m.groupby("asset_id")["market_equity"].shift(1)
     m = m[m["lag_market_equity"].gt(0)].copy()
-    denom = m.groupby("date")["lag_market_equity"].transform("sum")
-    m["weight"] = m["lag_market_equity"] / denom
-    rows = []
-    prev = pd.Series(dtype=float)
-    for date, g in m.groupby("date", sort=True):
-        cur = g.groupby("asset_id")["weight"].sum()
-        aligned = pd.concat([prev.rename("prev"), cur.rename("cur")], axis=1).fillna(0.0)
-        rows.append({"rebalance_date": date, "turnover": 0.5 * (aligned["cur"] - aligned["prev"]).abs().sum(), "gross": cur.abs().sum(), "net": cur.sum(), "n_assets": int(cur.ne(0).sum())})
-        prev = cur
-    return pd.DataFrame(rows)
+    m["target_weight"] = m["lag_market_equity"] / m.groupby("date")["lag_market_equity"].transform("sum")
+    book = WeightBook.from_holdings(m.rename(columns={"date": "rebalance_date"}), hold_start_col=None, hold_end_col=None)
+    return FactorBacktester().compute_turnover(book)
 
 
 def summary_table(bt: FactorBacktester, factor_returns: pd.DataFrame, ff3_holdings: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
@@ -55,8 +53,8 @@ def summary_table(bt: FactorBacktester, factor_returns: pd.DataFrame, ff3_holdin
     end_date = factor_returns["date"].max()
     turnover_by_factor = {
         "MKT_RF": market_turnover(monthly, start_date, end_date),
-        "SMB": bt.compute_turnover(make_ff3_long_short_holdings(ff3_holdings, "SMB")),
-        "HML": bt.compute_turnover(make_ff3_long_short_holdings(ff3_holdings, "HML")),
+        "SMB": bt.compute_turnover(ff3_spread_book(ff3_holdings, "SMB")),
+        "HML": bt.compute_turnover(ff3_spread_book(ff3_holdings, "HML")),
     }
     for name in FACTOR_NAMES:
         turnover_ppy = 12 if name == "MKT_RF" else 1
@@ -89,37 +87,21 @@ def write_factor_plots(bt: FactorBacktester, factor_returns: pd.DataFrame) -> No
     fig.write_html(DEMO / "ff3_factor_curves.html", include_plotlyjs="cdn")
 
 
-def winsorize_by_date(frame: pd.DataFrame, col: str, date_col: str = "rebalance_date", lower: float = 0.01, upper: float = 0.99) -> pd.Series:
-    parts = []
-    for _, g in frame.groupby(date_col, sort=True):
-        s = g[col]
-        clipped = s.clip(s.quantile(lower), s.quantile(upper))
-        parts.append(clipped)
-    return pd.concat(parts).sort_index()
-
-
-def assign_deciles(chars: pd.DataFrame, signal_col: str, signal_name: str, n_layers: int = 10) -> pd.DataFrame:
-    h = chars.copy()
-    h["rebalance_date"] = pd.to_datetime(h["rebalance_date"])
-    h = h.dropna(subset=[signal_col, "market_equity"])
-    h = h[h[signal_col].gt(0) & h["market_equity"].gt(0)].copy()
-    h["signal_raw"] = h[signal_col]
-    h["signal_winsor"] = winsorize_by_date(h, signal_col)
-
-    labels = [f"D{i:02d}" for i in range(1, n_layers + 1)]
-    parts = []
-    for _, g in h.groupby("rebalance_date", sort=True):
-        g = g.copy()
-        g["group"] = pd.qcut(g["signal_winsor"].rank(method="first"), q=n_layers, labels=labels)
-        parts.append(g)
-    h = pd.concat(parts, ignore_index=True)
-    h["hold_start"] = h["rebalance_date"] + pd.offsets.Day(1)
-    h["hold_end"] = h["rebalance_date"] + pd.DateOffset(years=1)
-    denom = h.groupby(["rebalance_date", "group"], observed=True)["market_equity"].transform("sum")
-    h["target_weight"] = h["market_equity"] / denom
-    h["leg"] = "long"
-    h["factor_name"] = signal_name
-    return h[["factor_name", "rebalance_date", "hold_start", "hold_end", "asset_id", "group", "leg", "target_weight", "signal_raw", "signal_winsor", "market_equity"]]
+def decile_factor(chars: pd.DataFrame, signal_col: str, name: str, direction: str):
+    """Value-weighted, winsorised deciles of a positive characteristic, held for one year."""
+    c = chars.dropna(subset=[signal_col, "market_equity"])
+    c = c[c[signal_col].gt(0) & c["market_equity"].gt(0)]
+    signal = to_wide(c, signal_col, date_col="rebalance_date")
+    market_equity = to_wide(c, "market_equity", date_col="rebalance_date")
+    long, short = (("D01",), ("D10",)) if direction == "low_minus_high" else (("D10",), ("D01",))
+    cfg = FactorConfig(name=name, n_groups=10, weighting="value", long_groups=long, short_groups=short)
+    factor = QuantileSignalFactorBuilder(config=cfg, winsorize=True, winsor_lower=0.01, winsor_upper=0.99).build_wide(
+        signal,
+        market_equity,
+        start_dates=signal.index + pd.offsets.Day(1),
+        end_dates=signal.index + pd.DateOffset(years=1),
+    )
+    return factor, signal, market_equity
 
 
 def decile_summary(bt: FactorBacktester, layer_returns: pd.DataFrame) -> pd.DataFrame:
@@ -137,35 +119,18 @@ def long_short_from_layers(layer_returns: pd.DataFrame, high: str = "D10", low: 
     return ret.rename("ret").reset_index()
 
 
-def long_short_holdings(holdings: pd.DataFrame, direction: str, high: str = "D10", low: str = "D01") -> pd.DataFrame:
-    groups = {high, low}
-    h = holdings[holdings["group"].isin(groups)].copy()
-    if direction == "low_minus_high":
-        scale = {low: 1.0, high: -1.0}
-    else:
-        scale = {high: 1.0, low: -1.0}
-    h["target_weight"] = h["target_weight"] * h["group"].map(scale).astype(float)
-    h["leg"] = np.where(h["target_weight"].ge(0), "long", "short")
-    return h
-
-
-def signal_forward_panel(holdings: pd.DataFrame, returns: pd.DataFrame) -> pd.DataFrame:
-    panel = holdings[["rebalance_date", "asset_id", "signal_winsor"]].copy()
-    panel = panel.rename(columns={"rebalance_date": "date", "signal_winsor": "factor_value"})
-    panel["forward_date"] = pd.to_datetime(panel["date"]) + pd.offsets.MonthEnd(1)
-    fwd = returns[["date", "asset_id", "ret"]].rename(columns={"date": "forward_date", "ret": "forward_ret"})
-    return panel.merge(fwd, on=["forward_date", "asset_id"], how="left")
-
-
-def write_ic_outputs(bt: FactorBacktester, name: str, holdings: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
+def write_ic_outputs(bt: FactorBacktester, name: str, factor, returns: pd.DataFrame) -> pd.Series:
+    """IC of the winsorised signal of held stocks against the following month's return."""
     try:
         import plotly.graph_objects as go
     except ImportError as exc:
         raise ImportError("plotly is required for plotting.") from exc
 
-    panel = signal_forward_panel(holdings, returns)
-    ic = bt.ic_analysis(panel)
-    r2 = bt.r2_analysis(panel)
+    held = factor.book.codes >= 0
+    signal = factor.signal.where(held)[held.any(axis=1)]
+    next_month = forward_returns(returns, signal.index, end_dates=signal.index + pd.offsets.MonthEnd(1))
+    ic = bt.ic_wide(signal, next_month).reset_index()
+    r2 = bt.r2_wide(signal, next_month).reset_index()
     ic.to_csv(DEMO / f"{name}_winsor_ic.csv", index=False)
     r2.to_csv(DEMO / f"{name}_winsor_r2.csv", index=False)
 
@@ -188,8 +153,8 @@ def write_ic_outputs(bt: FactorBacktester, name: str, holdings: pd.DataFrame, re
 
 def build_decile_demo(bt: FactorBacktester) -> None:
     chars = pd.read_parquet(RESULTS / "ff3_characteristics_2017_2025.parquet")
-    returns = pd.read_parquet(RESULTS / "crsp_monthly_permco_2017_2025.parquet")
-    returns = returns[returns["ff_primary_share"]][["date", "asset_id", "ret", "market_equity"]].copy()
+    monthly = pd.read_parquet(RESULTS / "crsp_monthly_permco_2017_2025.parquet")
+    returns = to_wide(monthly[monthly["ff_primary_share"]], "ret")
 
     specs = [
         ("bm", "bm", "BM winsorized deciles", "high_minus_low"),
@@ -198,17 +163,22 @@ def build_decile_demo(bt: FactorBacktester) -> None:
     ls_rows = []
     ic_rows = []
     for name, col, title, direction in specs:
-        holdings = assign_deciles(chars, col, name)
-        layers = bt.layer_portfolio_returns(holdings, returns)
+        factor, raw_signal, market_equity = decile_factor(chars, col, name, direction)
+        sim = bt.simulate(factor.book, returns)
+        layers = sim.to_long(LAYERS, name="group")[["date", "group", "ret", "n_assets"]]
         summary = decile_summary(bt, layers)
         ls = long_short_from_layers(layers, direction=direction)
-        spread_holdings = long_short_holdings(holdings, direction=direction)
-        spread_turnover = bt.compute_turnover(spread_holdings)
+        spread_turnover = bt.compute_turnover(factor.book, name)
         ls_summary = bt.summary(ls["ret"], spread_turnover, turnover_periods_per_year=1).rename(name)
         ls_rows.append(ls_summary)
-        ic_rows.append(write_ic_outputs(bt, name, holdings, returns))
+        ic_rows.append(write_ic_outputs(bt, name, factor, returns))
 
-        holdings.to_parquet(DEMO / f"{name}_winsor_decile_holdings.parquet", index=False, compression="zstd")
+        holdings = factor.book.to_long(extras={"signal_raw": raw_signal, "signal_winsor": factor.signal, "market_equity": market_equity})
+        holdings.insert(0, "factor_name", name)
+        decile_holdings = holdings[holdings["portfolio"].ne(name)].rename(columns={"portfolio": "group"})
+        spread_holdings = holdings[holdings["portfolio"].eq(name)].drop(columns="portfolio")
+        spread_holdings.insert(2, "leg", np.where(spread_holdings["target_weight"].ge(0), "long", "short"))
+        decile_holdings.to_parquet(DEMO / f"{name}_winsor_decile_holdings.parquet", index=False, compression="zstd")
         spread_holdings.to_parquet(DEMO / f"{name}_winsor_decile_spread_holdings.parquet", index=False, compression="zstd")
         spread_turnover.to_csv(DEMO / f"{name}_winsor_decile_turnover.csv", index=False)
         layers.to_csv(DEMO / f"{name}_winsor_decile_layer_returns.csv", index=False)

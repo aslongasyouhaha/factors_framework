@@ -121,6 +121,47 @@ def test_layer_book_layers_and_spread():
     np.testing.assert_allclose(sim.returns["S"], sim.returns["L3"] - sim.returns["L1"], atol=1e-15)
 
 
+def test_turnover_and_long_exports():
+    r = make_returns(n=30)
+    reb = r.index[[0, 20, 40]]
+    rng = np.random.default_rng(7)
+    signal = pd.DataFrame(rng.normal(size=(3, 30)), index=reb, columns=r.columns)
+    book = LayerBook(reb, r.columns, quantile_codes(signal, 3), rng.random((3, 30)), ["L1", "L2", "L3"], spreads={"S": (("L3",), ("L1",))})
+    bt = FactorBacktester()
+    turn = bt.compute_turnover(book, "S")
+    w = np.stack([book.weights_at(k)[:, 3] for k in range(3)])
+    np.testing.assert_allclose(turn["turnover"], 0.5 * np.abs(np.diff(np.vstack([np.zeros(30), w]), axis=0)).sum(axis=1))
+    np.testing.assert_allclose(turn["gross"], 2.0)
+    with pytest.raises(ValueError):
+        bt.compute_turnover(book)  # several portfolios: must name one
+
+    holdings = book.to_long(extras={"signal": signal})
+    assert set(holdings["portfolio"]) == {"L1", "L2", "L3", "S"}
+    row = holdings.iloc[0]
+    assert row["signal"] == signal.loc[row["rebalance_date"], row["asset_id"]]
+
+    sim = simulate(book, r)
+    long = sim.to_long(["L1", "S"])
+    assert set(long["portfolio"]) == {"L1", "S"} and (long["n_assets"] > 0).all()
+    np.testing.assert_allclose(long.set_index(["date", "portfolio"])["ret"].unstack()["S"], sim.returns["S"].loc[long["date"].unique()])
+
+
+def test_run_factor_and_wide_only_inputs():
+    from factors import FactorConfig, QuantileSignalFactorBuilder
+
+    r = make_returns(t=80, n=60)
+    reb = r.index[::20]
+    signal = pd.DataFrame(np.random.default_rng(8).normal(size=(len(reb), 60)), index=reb, columns=r.columns)
+    cfg = FactorConfig(name="LS", n_groups=5, weighting="equal", long_groups=("D05",), short_groups=("D01",))
+    wf = QuantileSignalFactorBuilder(config=cfg, winsorize=False).build_wide(signal)
+    res = FactorBacktester().run_factor(wf, r, make_plots=False)
+    assert list(res.returns.columns) == ["LS"] and res.ic is not None and res.by_year is not None
+    expected_ic = FactorBacktester().ic_wide(wf.signal, forward_returns(r, reb))["rank_ic"]
+    np.testing.assert_allclose(res.ic["rank_ic"], expected_ic)
+    with pytest.raises(TypeError):
+        FactorBacktester().simulate(wf.book, r.reset_index())  # long data must go through to_wide()
+
+
 def test_forward_returns_compound_each_holding_period():
     r = make_returns(nan_frac=0.0)
     reb = r.index[[0, 10]]

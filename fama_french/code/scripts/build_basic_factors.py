@@ -12,7 +12,7 @@ PROJECT_ROOT = CODE_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT.parent))
 sys.path.insert(0, str(CODE_ROOT))
 
-from factors import FactorBacktester, FactorConfig, QuantileSignalFactorBuilder
+from factors import FactorBacktester, FactorConfig, QuantileSignalFactorBuilder, forward_returns, to_wide
 
 
 RAW = PROJECT_ROOT / "data" / "raw"
@@ -229,8 +229,10 @@ def financial_factor_panel(chars: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_one(spec: dict[str, str], panel: pd.DataFrame, returns: pd.DataFrame, bt: FactorBacktester) -> tuple[pd.Series, pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build one decile factor on date x asset matrices; `returns` is the monthly return matrix."""
+    name = spec["name"]
     cfg = FactorConfig(
-        name=spec["name"],
+        name=name,
         frequency="monthly" if spec["panel"] == "monthly" else "annual",
         n_groups=10,
         weighting="value",
@@ -238,21 +240,26 @@ def build_one(spec: dict[str, str], panel: pd.DataFrame, returns: pd.DataFrame, 
         short_groups=("D01",),
     )
     builder = QuantileSignalFactorBuilder(signal_source_col=spec["signal_col"], config=cfg, winsorize=True, winsor_lower=0.01, winsor_upper=0.99)
-    factor = builder.build({"panel": panel})
-    spread_holdings = builder.spread_holdings(factor.holdings)
-    layer_returns = bt.layer_portfolio_returns(factor.holdings, returns)
-    spread_returns = bt.portfolio_returns(spread_holdings, returns)
-    turnover = bt.compute_turnover(spread_holdings)
-    turnover_ppy = 12 if spec["panel"] == "monthly" else 1
-    summary = bt.summary(spread_returns["ret"], turnover, turnover_periods_per_year=turnover_ppy).rename(spec["name"])
+    p = panel.dropna(subset=[spec["signal_col"]])
+    signal = to_wide(p, spec["signal_col"], date_col="rebalance_date")
+    market_equity = to_wide(p, "market_equity", date_col="rebalance_date")
+    window = p.groupby("rebalance_date").agg(start=("hold_start", "min"), end=("hold_end", "max")).reindex(signal.index)
+    factor = builder.build_wide(signal, market_equity, start_dates=window["start"], end_dates=window["end"])
+    book = factor.book
 
-    ic_panel = factor.holdings[["rebalance_date", "hold_start", "asset_id", "signal_value"]].drop_duplicates(["rebalance_date", "asset_id"])
-    ic_panel = ic_panel.rename(columns={"rebalance_date": "date", "signal_value": "factor_value"})
-    ic_panel["forward_date"] = pd.to_datetime(ic_panel["hold_start"]) + pd.offsets.MonthEnd(0)
-    fwd = returns[["date", "asset_id", "ret"]].rename(columns={"date": "forward_date", "ret": "forward_ret"})
-    ic_panel = ic_panel.merge(fwd, on=["forward_date", "asset_id"], how="left")
-    ic = bt.ic_analysis(ic_panel[["date", "asset_id", "factor_value", "forward_ret"]])
-    r2 = bt.r2_analysis(ic_panel[["date", "asset_id", "factor_value", "forward_ret"]])
+    sim = bt.simulate(book, returns)
+    layer_returns = sim.to_long(builder.group_labels, name="group")[["date", "group", "ret", "n_assets"]]
+    spread_returns = sim.to_long([name]).drop(columns="portfolio")
+    turnover = bt.compute_turnover(book, name)
+    turnover_ppy = 12 if spec["panel"] == "monthly" else 1
+    summary = bt.summary(spread_returns["ret"], turnover, turnover_periods_per_year=turnover_ppy).rename(name)
+
+    # IC of the winsorised signal of held stocks against the following month's return.
+    held = book.codes >= 0
+    ic_signal = factor.signal.where(held)[held.any(axis=1)]
+    next_month = forward_returns(returns, ic_signal.index, end_dates=ic_signal.index + pd.offsets.MonthEnd(1))
+    ic = bt.ic_wide(ic_signal, next_month).reset_index()
+    r2 = bt.r2_wide(ic_signal, next_month).reset_index()
     ic_summary = pd.Series(
         {
             "mean_ic": ic["ic"].mean(),
@@ -263,18 +270,23 @@ def build_one(spec: dict[str, str], panel: pd.DataFrame, returns: pd.DataFrame, 
             "cos_ic_ir": ic["cos_ic"].mean() / ic["cos_ic"].std(ddof=1),
             "mean_r2": r2["r2"].mean(),
         },
-        name=spec["name"],
+        name=name,
     )
 
-    stem = spec["name"].lower()
-    factor.holdings.to_parquet(OUT / f"{stem}_decile_holdings.parquet", index=False, compression="zstd")
+    holdings = book.to_long(extras={"signal_value": factor.signal, "market_equity": market_equity})
+    decile_holdings = holdings[holdings["portfolio"].ne(name)].rename(columns={"portfolio": "group"})
+    spread_holdings = holdings[holdings["portfolio"].eq(name)].drop(columns="portfolio")
+    spread_holdings.insert(1, "leg", np.where(spread_holdings["target_weight"].gt(0), "long", "short"))
+
+    stem = name.lower()
+    decile_holdings.to_parquet(OUT / f"{stem}_decile_holdings.parquet", index=False, compression="zstd")
     spread_holdings.to_parquet(OUT / f"{stem}_spread_holdings.parquet", index=False, compression="zstd")
-    layer_returns.assign(factor=spec["name"]).to_csv(OUT / f"{stem}_layer_returns.csv", index=False)
-    spread_returns.assign(factor=spec["name"]).to_csv(OUT / f"{stem}_spread_returns.csv", index=False)
+    layer_returns.assign(factor=name).to_csv(OUT / f"{stem}_layer_returns.csv", index=False)
+    spread_returns.assign(factor=name).to_csv(OUT / f"{stem}_spread_returns.csv", index=False)
     turnover.to_csv(OUT / f"{stem}_turnover.csv", index=False)
-    ic.assign(factor=spec["name"]).to_csv(OUT / f"{stem}_ic.csv", index=False)
-    r2.assign(factor=spec["name"]).to_csv(OUT / f"{stem}_r2.csv", index=False)
-    return summary, ic_summary, spread_returns.assign(factor=spec["name"]), layer_returns.assign(factor=spec["name"]), ic.assign(factor=spec["name"])
+    ic.assign(factor=name).to_csv(OUT / f"{stem}_ic.csv", index=False)
+    r2.assign(factor=name).to_csv(OUT / f"{stem}_r2.csv", index=False)
+    return summary, ic_summary, spread_returns.assign(factor=name), layer_returns.assign(factor=name), ic.assign(factor=name)
 
 
 def write_plots(spread_returns: pd.DataFrame, layer_returns: pd.DataFrame, ic: pd.DataFrame) -> None:
@@ -317,7 +329,7 @@ def main() -> None:
     monthly_panel = monthly_signal_panel(monthly)
     annual_panel = annual_characteristic_panel()
     financial_panel = financial_factor_panel(annual_panel)
-    returns = monthly[["date", "asset_id", "ret", "market_equity"]].copy()
+    returns = to_wide(monthly, "ret")
     panels = {"monthly": monthly_panel, "annual_chars": annual_panel, "financial": financial_panel}
 
     summaries = []

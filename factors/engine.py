@@ -61,25 +61,34 @@ class Book:
     def segments(self, index: pd.DatetimeIndex) -> np.ndarray:
         return holding_segments(index, self.dates, self.start_dates, self.end_dates)
 
-    def to_long(self) -> pd.DataFrame:
-        """Long holdings table (non-zero weights only), for inspection or saving."""
-        parts = []
-        for k, date in enumerate(self.dates):
+    def to_long(self, extras: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
+        """Long holdings table (non-zero weights only), for inspection or saving.
+
+        extras: name -> rebalance-date x asset matrix (e.g. the signal or market equity) whose
+        value for each holding is added as a column.
+        """
+        ks, assets, ports, weights = [], [], [], []
+        for k in range(len(self.dates)):
             w = self.weights_at(k)
             rows, cols = np.nonzero(w)
-            parts.append(
-                pd.DataFrame(
-                    {
-                        "rebalance_date": date,
-                        "portfolio": np.asarray(self.names, dtype=object)[cols],
-                        "asset_id": self.assets[rows],
-                        "target_weight": w[rows, cols],
-                    }
-                )
-            )
-        if not parts:
-            return pd.DataFrame(columns=["rebalance_date", "portfolio", "asset_id", "target_weight"])
-        return pd.concat(parts, ignore_index=True)
+            ks.append(np.full(len(rows), k))
+            assets.append(rows)
+            ports.append(cols)
+            weights.append(w[rows, cols])
+        cat = lambda parts, dtype: np.concatenate(parts) if parts else np.zeros(0, dtype=dtype)
+        k_idx, a_idx, p_idx = cat(ks, int), cat(assets, int), cat(ports, int)
+        out = pd.DataFrame(
+            {
+                "rebalance_date": self.dates[k_idx],
+                "portfolio": np.asarray(self.names, dtype=object)[p_idx],
+                "asset_id": self.assets[a_idx],
+                "target_weight": cat(weights, float),
+            }
+        )
+        for name, mat in (extras or {}).items():
+            values = mat.reindex(index=self.dates, columns=self.assets).to_numpy()
+            out[name] = values[k_idx, a_idx]
+        return out
 
 
 class WeightBook(Book):
@@ -273,6 +282,21 @@ class SimulationResult:
     n_assets: pd.DataFrame
     turnover: pd.DataFrame
     cost: pd.DataFrame
+
+    def to_long(self, portfolios: Sequence[str] | None = None, name: str = "portfolio") -> pd.DataFrame:
+        """Long table (date, portfolio, ret, gross_exposure, net_exposure, n_assets) for saving;
+        rows where a portfolio held no asset with a return are dropped."""
+        cols = list(self.returns.columns if portfolios is None else portfolios)
+        parts = {
+            "ret": self.returns[cols],
+            "gross_exposure": self.gross[cols],
+            "net_exposure": self.net[cols],
+            "n_assets": self.n_assets[cols],
+        }
+        out = pd.concat({k: v.stack(dropna=False) for k, v in parts.items()}, axis=1)
+        out = out.rename_axis(["date", name]).reset_index()
+        out["n_assets"] = out["n_assets"].fillna(0).astype(int)
+        return out[out["n_assets"].gt(0)].sort_values(["date", name]).reset_index(drop=True)
 
 
 def _aligned_values(frame: pd.DataFrame, columns: pd.Index) -> np.ndarray:
