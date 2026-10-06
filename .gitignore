@@ -1,24 +1,20 @@
-# Data, results and third-party documents are never committed:
-# CRSP / Compustat / OptionMetrics data are licensed, papers are copyrighted.
-*.zip
+# All data stays local: CRSP / Compustat / OptionMetrics data are licensed, and data/base and
+# data/factors are derived from them.
+/data/
+
+# Papers are copyrighted; keep them next to the project (doc/paper.pdf) but out of git.
 *.pdf
-*.parquet
+
+# Generated outputs. Each project's result/summary.md is committed.
 *.csv
+*.parquet
 *.xlsx
+*.zip
 *.db
 *.log
 *.err
 *.png
 *.html
-**/data/**
-!**/data/**/
-!**/data/**/*.ipynb
-results/
-outputs/
-figures/
-
-# Misplaced duplicate of embedded_leverage/scripts; pairs trading code not written yet.
-pair_trading/
 
 # Python / tooling
 __pycache__/
