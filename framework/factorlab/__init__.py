@@ -30,6 +30,9 @@ from .fama_french import FamaFrench3Builder, annual_characteristics, link_to_per
 from .quantile import QuantileSignalFactorBuilder
 from . import data, panels, report  # noqa: E402
 from .sorted_factor import SortedFactorBuilder
+from .factor_universe import characteristic_test_assets, ff49_industry_returns, local_factor_returns
+from .risk_parity import ARPResult, agnostic_risk_parity_backtest
+from .bayesian_sdf import BayesianSDFResult, continuous_spike_slab_sdf, psi_from_prior_sharpe
 
 __all__ = [
     "BacktestResult",
@@ -49,6 +52,14 @@ __all__ = [
     "StandardizationRule",
     "WeightBook",
     "WideFactor",
+    "ARPResult",
+    "BayesianSDFResult",
+    "agnostic_risk_parity_backtest",
+    "characteristic_test_assets",
+    "continuous_spike_slab_sdf",
+    "ff49_industry_returns",
+    "local_factor_returns",
+    "psi_from_prior_sharpe",
     "annual_characteristics",
     "data",
     "link_to_permno",

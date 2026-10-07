@@ -1,11 +1,11 @@
 # Good Volatility, Bad Volatility (RSJ)
 
-This project implements the relative signed jump variation factor in Bollerslev,
-Li, and Zhao (JFQA, 2020) using the shared `factorlab` framework.
+Paper: Bollerslev, Li, and Zhao (2020), *Good Volatility, Bad Volatility,
+and the Cross Section of Stock Returns*, JFQA 55(3), 751–781.
 
-## Definition
+## Definition and direction
 
-For stock `i` on day `t`, using intraday log returns `r`:
+For five-minute intraday log returns `r`:
 
 ```text
 RV+ = sum(r^2 where r > 0)
@@ -13,70 +13,84 @@ RV- = sum(r^2 where r < 0)
 RSJ = (RV+ - RV-) / (RV+ + RV-)
 ```
 
-The paper's weekly signal is the mean of the five daily RSJ observations. It is
-formed at Tuesday's close and held until the next Tuesday close. The traded
-factor is **low RSJ minus high RSJ**: buy stocks dominated by negative jumps and
-short stocks dominated by positive jumps.
+The weekly raw signal is the arithmetic mean of five consecutive daily RSJ
+observations and is formed at Tuesday's close. The paper buys low RSJ and shorts
+high RSJ. Because this repository requires "larger exposure means long", the
+stored exposure is `-weekly_RSJ`.
 
-## Layout
+## Local source and point-in-time universe
 
-```text
-bollerslev_li_zhao_2020_good_bad_volatility/
-  rsj.py          factor construction (realized measures, weekly signal)
-  build.py        command-line replication: signals -> data/factors/<project>/, backtest -> result/
-  tests/          unit tests
-  doc/            this note (put the paper PDF here as paper.pdf)
-  result/         generated tables and portfolios
-```
+The one-minute source currently lives at `F:\temp` and is not copied into the
+repository. It contains 72 quarterly Parquet files, 2008Q1–2025Q4, with about
+2.37 billion rows (27.9 GB). Fields are UTC Unix timestamp, UTC date and minute,
+symbol, and unadjusted one-minute OHLCV.
 
-Intraday input data goes in `data/source/` (not committed).
+The vendor symbol is not a permanent identifier. `pipeline/build_crsp_daily.py`
+therefore creates a year-partitioned point-in-time bridge containing historical
+CRSP TradingSymbol, PERMNO, total return, price and market equity. It retains
+active US common equities on NYSE, AMEX and NASDAQ. During the minute build the
+universe is further restricted to CRSP prices from $5 through $1,000. Ambiguous
+symbol-date mappings are dropped instead of guessed.
 
-## Input data
+## Intraday treatment
 
-The intraday input must be a CSV or Parquet long table with:
+`pipeline/build_rsj_daily.py`:
 
-- `timestamp`: exchange-local timestamp;
-- `asset_id`: permanent security identifier;
-- `price`: positive price sampled on a regular intraday grid, normally 5-minute
-  bars; alternatively supply `intraday_ret`, containing intraday log returns.
+1. interprets `timestamp` in UTC and uses a DST-aware 09:30 New York session
+   opening minute;
+2. keeps session minutes 0–390 and drops pre/post-market observations;
+3. aggregates minutes 0–389 into 78 five-minute intervals;
+4. carries the last observed price across an empty interval;
+5. uses the **open** of the 16:00 vendor bar as the final endpoint, capturing
+   the closing auction without using its post-market close;
+6. removes demonstrable vendor bad ticks: open and close must be within
+   0.5x–2.0x the point-in-time CRSP daily close, and isolated observations
+   more than 1.5x away from a centered five-observation median are dropped;
+7. requires at least 60 valid five-minute returns and positive realized
+   variance.
 
-The constructor does **not** manufacture missing bars. Prepare a regular grid
-upstream and carry the last valid transaction price forward within the trading
-session if replicating the paper's TAQ procedure. By default a stock-day needs
-at least 60 valid intraday returns.
+The first return of a day starts from the first observed intraday `open`, so no
+overnight return or split gap enters RSJ.
 
-For value weighting, provide a separate long table with `date`, `asset_id`, and
-`market_equity`. Daily returns used for the backtest must contain `date`,
-`asset_id`, and `ret` (decimal total return, including delisting returns where
-available).
-
-## Run
-
-Signal and holdings only, equal weighted:
-
-```powershell
-python good_bad_volatility/scripts/build_rsj_factor.py `
-  --bars data/intraday_5min.parquet `
-  --output good_bad_volatility/results `
-  --weighting equal
-```
-
-Full value-weighted backtest:
+## Build and report
 
 ```powershell
-python good_bad_volatility/scripts/build_rsj_factor.py `
-  --bars data/intraday_5min.parquet `
-  --market-equity data/market_equity.parquet `
-  --returns data/daily_returns.parquet `
-  --output good_bad_volatility/results `
-  --weighting value --cost-bps 10
+python pipeline/build_crsp_daily.py --start-year 2008 --end-year 2025
+python pipeline/build_rsj_daily.py --source F:\temp --start-year 2008 --end-year 2025
+python factors/bollerslev_li_zhao_2020_good_bad_volatility/build.py
+python factors/bollerslev_li_zhao_2020_good_bad_volatility/report.py
 ```
 
-Outputs follow the repository convention: daily realized measures, weekly
-signals, quintile holdings, low-minus-high holdings, return series, turnover,
-IC, and summary statistics.
+Outputs:
 
-The two large root ZIP files currently contain daily OHLCV data. They cannot
-replicate RSJ because the factor requires intraday returns; using daily returns
-would create a different sign-of-return proxy rather than the paper's factor.
+- `data/base/crsp_daily/YYYY.parquet`: point-in-time daily CRSP data;
+- `data/base/rsj_daily/YYYYQn.parquet`: daily realized measures;
+- `data/base/rsj_daily/inventory.csv`: quarter-level row counts and validation
+  diagnostics;
+- `data/factors/bollerslev_li_zhao_2020_good_bad_volatility/`: weekly exposure
+  and raw weekly realized measures;
+- `factors/bollerslev_li_zhao_2020_good_bad_volatility/result/`: value-weighted
+  quintiles, low-minus-high return, turnover, IC and yearly results.
+
+The report compounds CRSP total returns over Tuesday-to-Tuesday holding periods
+and uses formation-date CRSP market equity. Its main spread is D05 minus D01 in
+the stored `-RSJ` exposure, which is economically low raw RSJ minus high raw
+RSJ.
+
+## Local replication result
+
+The completed 2008–2025 build contains 7,714,327 stock-day realized-measure
+rows and 1,509,393 weekly exposures for 3,923 PERMNOs. In the standard
+value-weighted quintile report, low raw RSJ minus high raw RSJ earns -0.68% per
+year (Newey-West t = -0.23; 931 weekly observations). Thus this local vendor
+sample does **not** reproduce the paper's positive premium. This is a result,
+not a direction flip: D05 in stored `-RSJ` is the low-raw-RSJ portfolio.
+
+## Differences from the paper
+
+- Available sample is 2008–2025 rather than 1993–2013.
+- Source is vendor one-minute aggregate OHLCV rather than cleaned TAQ trades.
+- A one-minute bar cannot isolate the exact transaction at each five-minute
+  grid point; the construction above uses interval endpoints and the 16:00 bar
+  open as a documented approximation.
 

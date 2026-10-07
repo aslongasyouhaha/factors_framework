@@ -11,6 +11,7 @@ from .backtest import FactorBacktester
 from .base import FactorConfig
 from .engine import forward_returns
 from .evaluation import ic_decay, ic_summary
+from .evaluation import performance_by_year, performance_summary
 from .quantile import QuantileSignalFactorBuilder
 
 # Standard result page for a factor stored with data.save_factor: decile layers, the long-short
@@ -26,6 +27,53 @@ DEFAULT_REPORT = {
     "periods_per_year": 12,
     "rebalances_per_year": 12,
 }
+
+
+def paper_factor_report(project: str, out_dir: Path, factor_column: str) -> dict[str, Any]:
+    """Report a paper-specific traded factor stored in factor_returns.parquet."""
+    _, meta = data.load_factor(project)
+    returns = data.load_factor_table(project, "factor_returns")
+    returns["date"] = pd.to_datetime(returns["date"])
+    series = returns.set_index("date")[factor_column].dropna().sort_index()
+    summary = performance_summary(series, 12)
+    by_year = performance_by_year(series, 12)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    returns.to_csv(out_dir / "factor_returns.csv", index=False)
+    summary.to_frame().T.to_csv(out_dir / "summary.csv")
+    by_year.to_csv(out_dir / "by_year.csv")
+    if (data.factor_dir(project) / "group_returns.parquet").exists():
+        data.load_factor_table(project, "group_returns").to_csv(out_dir / "group_returns.csv", index=False)
+    head = summary[["n", "ann_return", "ann_vol", "sharpe", "t_nw", "max_drawdown", "hit_rate"]].to_frame().T
+    head.index.name = "factor"
+    lines = [
+        f"# {meta.get('title', factor_column)}", "", f"- Paper: {meta.get('paper', '')}",
+        f"- Construction: {meta.get('description', '')}", "", "## Factor return",
+        _fmt_table(head, pct=("ann_return", "ann_vol", "max_drawdown", "hit_rate")), "", "## By year",
+        _fmt_table(by_year[["n", "total_return", "sharpe", "max_drawdown", "hit_rate"]], pct=("total_return", "max_drawdown", "hit_rate")), ""
+    ]
+    (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
+    return {"summary": summary, "by_year": by_year, "returns": returns}
+
+
+def weekly_crsp_inputs(rebalance_dates: pd.DatetimeIndex, assets: set[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compound CRSP daily returns into consecutive weekly formation periods."""
+    from .panel import to_wide
+    rebalances = pd.DatetimeIndex(sorted(pd.to_datetime(rebalance_dates).unique()))
+    returns, weights = [], []
+    for file in sorted((data.BASE / "crsp_daily").glob("????.parquet")):
+        x = pd.read_parquet(file, columns=["date","asset_id","ret","market_equity"])
+        x["date"] = pd.to_datetime(x["date"])
+        x = x[x["asset_id"].isin(assets)].sort_values(["asset_id","date"])
+        weights.append(x[x["date"].isin(rebalances)][["date","asset_id","market_equity"]])
+        pos = rebalances.searchsorted(x["date"], side="left")
+        valid = pos < len(rebalances)
+        x = x[valid].copy(); x["date"] = rebalances[pos[valid]].to_numpy(); x["gross"] = 1 + x["ret"].fillna(0)
+        returns.append(x.groupby(["date","asset_id"], as_index=False)["gross"].prod())
+    weekly = pd.concat(returns).groupby(["date","asset_id"], as_index=False)["gross"].prod()
+    weekly["ret"] = weekly["gross"] - 1
+    me = pd.concat(weights).drop_duplicates(["date","asset_id"], keep="last")
+    return to_wide(weekly,"ret"), to_wide(me,"market_equity")
 
 
 def _next_period_returns(returns: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:

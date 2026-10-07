@@ -56,6 +56,21 @@ python factors/jegadeesh_titman_1993_momentum/report.py
 | banz_1981_size | 规模 | 统一口径基准版 |
 | fama_french_1992_book_to_market | 账面市值比 | 统一口径基准版 |
 | jegadeesh_titman_1993_momentum | 动量 12-2 | 统一口径基准版 |
+| blitz_huij_martens_2011_residual_momentum | FF3 残差动量 | 月度滚动估计版 |
+| hou_xue_zhang_2015_q_factor | q-factor | 规模、投资、ROE 的月度 2×3×3 因子模型 |
+| piotroski_2000_fscore | F-score | 高账面市值比股票内九项财务强度组合 |
+| jegadeesh_livnat_2006_sue | SUE | 拆股调整 EPS、真实公告日版本 |
+| pontiff_woodgate_2008_share_issuance | 净股票发行 | RETX 推导的 t-18 至 t-6 实际股数增长 |
+| amaya_et_al_2015_realized_skewness | 实现偏度 | 五分钟收益、周度形成 |
+| amaya_et_al_2015_realized_kurtosis | 实现峰度 | 五分钟收益、周度形成 |
+| daniel_hirshleifer_sun_2020_pead | PEAD | 四日 CAR、月度 NYSE 断点 2×3 因子 |
+| fama_french_2015_rmw | RMW | 年度 June、NYSE 断点 2×3 因子 |
+| fama_french_2015_cma | CMA | 年度 June、NYSE 断点 2×3 因子 |
+| de_bondt_thaler_1985_long_term_reversal | 长期反转 | 60-13 月收益 |
+| novy_marx_2012_intermediate_momentum | 中期动量 | 12-7 月收益 |
+| hirshleifer_et_al_2004_net_operating_assets | 净经营资产 | 年度 June、滞后资产分母、NYSE 断点 2×3 |
+| frazzini_pedersen_2014_bab | BAB | 排名权重、两腿 Beta 归一的论文组合 |
+| bali_cakici_whitelaw_2011_max | MAX | 上月最大日收益 |
 | jegadeesh_1990_short_term_reversal | 短期反转 | 统一口径基准版 |
 | ang_hodrick_xing_zhang_2006_volatility | 低波动 | 基准版，定义与原文不同 |
 | amihud_2002_illiquidity | 非流动性 | 基准版，定义与原文不同 |
@@ -70,8 +85,10 @@ python factors/jegadeesh_titman_1993_momentum/report.py
 | sloan_1996_accruals | 应计 | 月度时点版 |
 | titman_wei_xie_2004_capital_investment | 资本支出 | 月度时点版，定义与原文不同 |
 | frazzini_pedersen_2012_embedded_leverage | 期权、杠杆 ETF 的 BAB | 独立脚本，尚未接入框架 |
-| bollerslev_li_zhao_2020_good_bad_volatility | RSJ | 代码完成，缺日内数据 |
-| benichou_et_al_2016_agnostic_risk_parity 等 5 个 | — | 只有论文 |
+| bollerslev_li_zhao_2020_good_bad_volatility | RSJ | 已完成 2008–2025 分钟数据构建、点时股票池与标准回测 |
+| bryzgalova_huang_julliard_2023_factor_zoo | Bayesian BMA-SDF | 已按官方算法在本地 37 因子及 FF49 行业测试资产上实现 |
+| benichou_et_al_2016_agnostic_risk_parity | ARP 组合配置 | 已在本地 37 因子收益上完成算法对比 |
+| 其余未纳入标准项目的 5 个目录 | — | 尚未实现或仅有独立脚本 |
 
 "统一口径基准版" / "月度时点版"：同样的样本期和市值加权十分位多空，便于横向比较；财务因子每月用已公布的最新季度数据。与原文的差异写在各项目的 `doc/notes.md`。
 
