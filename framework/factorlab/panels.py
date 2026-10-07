@@ -28,7 +28,9 @@ def crsp_monthly(primary_only: bool = True) -> pd.DataFrame:
     if primary_only:
         m = m[m["ff_primary_share"]].copy()
     m["date"] = pd.to_datetime(m["date"])
-    for col in ["ret", "market_equity", "dollar_volume"]:
+    for col in ["ret", "retx", "market_equity", "dollar_volume"]:
+        if col not in m.columns:
+            continue
         m[col] = pd.to_numeric(m[col], errors="coerce")
     return m.sort_values(["asset_id", "date"])
 
@@ -85,7 +87,7 @@ def annual_characteristics(start_year: int = SAMPLE_YEARS[0], end_year: int = SA
 def annual_accounting_panel(start_year: int = SAMPLE_YEARS[0], end_year: int = SAMPLE_YEARS[1], lag_cols: Sequence[str] = ()) -> pd.DataFrame:
     """June formation universe joined with the fiscal year ending in the previous calendar year,
     keeping only fiscal years announced by the June formation date."""
-    chars = annual_characteristics(start_year, end_year)[["rebalance_date", "asset_id", "market_equity", "bm", "dec_market_equity"]]
+    chars = annual_characteristics(start_year, end_year)[["rebalance_date", "asset_id", "market_equity", "bm", "book_equity", "dec_market_equity", "exchange_code"]]
     chars["be_year"] = chars["rebalance_date"].dt.year - 1
     acc = compustat_annual(lag_cols).rename(columns={"fyear": "be_year"}).drop(columns=["book_equity"])
     out = chars.merge(acc, on=["asset_id", "be_year"], how="inner")

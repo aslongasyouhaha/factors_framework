@@ -17,7 +17,7 @@ import pandas as pd
 from common import CRSP_DAILY_ZIP, NestedZipFirstCsvReader, save_base
 
 USECOLS = [
-    "PERMNO", "PERMCO", "DlyCalDt", "DlyRet", "DlyPrc", "DlyCap", "DlyVol", "PrimaryExch",
+    "PERMNO", "PERMCO", "DlyCalDt", "DlyRet", "DlyRetx", "DlyPrc", "DlyCap", "DlyVol", "PrimaryExch",
     "SecurityType", "SecuritySubType", "ShareType", "USIncFlg", "TradingStatusFlg", "ConditionalType", "SecurityBegDt",
     "SICCD",
 ]
@@ -34,6 +34,7 @@ def monthly_from_chunk(chunk: pd.DataFrame, start_year: int, end_year: int) -> p
             "PERMCO": "company_id",
             "DlyCalDt": "date",
             "DlyRet": "ret",
+            "DlyRetx": "retx",
             "DlyPrc": "price",
             "DlyCap": "market_equity",
             "DlyVol": "volume",
@@ -55,6 +56,7 @@ def monthly_from_chunk(chunk: pd.DataFrame, start_year: int, end_year: int) -> p
     if chunk.empty:
         return None
     chunk["ret"] = pd.to_numeric(chunk["ret"], errors="coerce")
+    chunk["retx"] = pd.to_numeric(chunk["retx"], errors="coerce")
     chunk["company_id"] = pd.to_numeric(chunk["company_id"], errors="coerce")
     chunk["market_equity"] = pd.to_numeric(chunk["market_equity"], errors="coerce")
     chunk["price"] = pd.to_numeric(chunk["price"], errors="coerce").abs()
@@ -66,6 +68,7 @@ def monthly_from_chunk(chunk: pd.DataFrame, start_year: int, end_year: int) -> p
     chunk["exchange_code"] = exchange_code(chunk["primary_exchange"])
     chunk["month"] = chunk["date"] + pd.offsets.MonthEnd(0)
     chunk["ret_gross"] = 1.0 + chunk["ret"]
+    chunk["retx_gross"] = 1.0 + chunk["retx"]
     chunk["dollar_volume"] = chunk["price"] * chunk["volume"]
     monthly = (
         chunk.sort_values(["asset_id", "date"])
@@ -73,6 +76,7 @@ def monthly_from_chunk(chunk: pd.DataFrame, start_year: int, end_year: int) -> p
         .agg(
             company_id=("company_id", "last"),
             ret_gross=("ret_gross", "prod"),
+            retx_gross=("retx_gross", "prod"),
             n_ret=("ret", "count"),
             last_trade_date=("date", "last"),
             market_equity=("market_equity", "last"),
@@ -83,7 +87,8 @@ def monthly_from_chunk(chunk: pd.DataFrame, start_year: int, end_year: int) -> p
         )
     )
     monthly["ret"] = monthly["ret_gross"] - 1.0
-    return monthly.drop(columns="ret_gross")
+    monthly["retx"] = monthly["retx_gross"] - 1.0
+    return monthly.drop(columns=["ret_gross", "retx_gross"])
 
 
 def assign_permco_market_equity(monthly: pd.DataFrame) -> pd.DataFrame:
@@ -116,6 +121,7 @@ def build(start_year: int, end_year: int, chunksize: int) -> pd.DataFrame:
         .agg(
             company_id=("company_id", "last"),
             ret=("ret", lambda x: (1.0 + x).prod() - 1.0),
+            retx=("retx", lambda x: (1.0 + x).prod() - 1.0),
             n_ret=("n_ret", "sum"),
             last_trade_date=("last_trade_date", "last"),
             market_equity=("market_equity", "last"),

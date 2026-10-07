@@ -19,9 +19,10 @@ import pandas as pd
 from common import CCM_LINK_ZIP, COMPUSTAT_QUARTERLY_ZIP, save_base
 from factorlab import FactorBuildTools
 
-ITEMS = ["atq", "ltq", "seqq", "ceqq", "txditcq", "pstkrq", "pstkq", "saleq", "cogsq", "niq", "ibq",
-         "oiadpq", "cheq", "dlttq", "dlcq", "actq", "lctq", "dpq", "capxy"]
-FLOWS = ["saleq", "gross_profit_q", "net_income_q", "oiadpq", "dpq", "capx_q"]
+ITEMS = ["atq", "ltq", "seqq", "ceqq", "txditcq", "pstkrq", "pstkq", "saleq", "cogsq", "xsgaq",
+         "xintq", "mibq", "niq", "ibq", "oiadpq", "cheq", "dlttq", "dlcq", "actq", "lctq", "dpq", "capxy",
+         "oancfy", "cshoq", "ajexq", "epspxq", "rectq", "invtq", "ppentq", "apq", "txpq", "xrdq", "revtq"]
+FLOWS = ["saleq", "gross_profit_q", "operating_profit_q", "net_income_q", "oiadpq", "dpq", "capx_q"]
 FALLBACK_DAYS = 90       # availability lag when rdq is missing or earlier than the quarter end
 MAX_TTM_SPAN_DAYS = 300  # datadate[t] - datadate[t-3]: about 9 months for four consecutive quarters
 
@@ -59,6 +60,13 @@ def add_derived_fields(q: pd.DataFrame) -> pd.DataFrame:
     g = q.groupby("gvkey")
 
     q["gross_profit_q"] = q["saleq"] - q["cogsq"]
+    # French's OP numerator: revenue minus COGS, SG&A and interest.  Revenue is
+    # required and at least one expense must be reported; missing remaining
+    # expenses are treated as zero, matching the data-library convention.
+    expenses = q[["cogsq", "xsgaq", "xintq"]]
+    q["operating_profit_q"] = (
+        q["saleq"] - expenses.fillna(0).sum(axis=1)
+    ).where(q["saleq"].notna() & expenses.notna().any(axis=1))
     q["net_income_q"] = q["niq"].combine_first(q["ibq"])
     # capxy is year-to-date within the fiscal year: difference consecutive quarters of a year.
     prev_capx, prev_fqtr, prev_fyear = g["capxy"].shift(1), g["fqtr"].shift(1), g["fyearq"].shift(1)
